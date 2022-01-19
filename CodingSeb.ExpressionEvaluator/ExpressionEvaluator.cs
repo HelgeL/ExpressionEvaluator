@@ -40,6 +40,7 @@ namespace CodingSeb.ExpressionEvaluator
 
         protected static readonly Regex otherBasesNumberRegex = new Regex("^(?<sign>[+-])?(?<value>0(?<type>x)([0-9a-f][0-9a-f_]*[0-9a-f]|[0-9a-f])|0(?<type>b)([01][01_]*[01]|[01]))", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         protected static readonly Regex stringBeginningRegex = new Regex("^(?<interpolated>[$])?(?<escaped>[@])?[\"]", RegexOptions.Compiled);
+        protected static readonly Regex singleQuotedStringBeginningRegex = new Regex("^(?<interpolated>[$])?(?<escaped>[@])?[']", RegexOptions.Compiled);
         protected static readonly Regex internalCharRegex = new Regex(@"^['](\\[\\'0abfnrtv]|[^'])[']", RegexOptions.Compiled);
         protected static readonly Regex indexingBeginningRegex = new Regex(@"^[?]?\[", RegexOptions.Compiled);
         protected static readonly Regex assignationOrPostFixOperatorRegex = new Regex(@"^(?>\s*)((?<assignmentPrefix>[+\-*/%&|^]|<<|>>)?=(?![=>])|(?<postfixOperator>([+][+]|--)(?![" + diactiticsKeywordsRegexPattern + "0-9])))");
@@ -55,6 +56,11 @@ namespace CodingSeb.ExpressionEvaluator
         protected static readonly Regex lambdaExpressionRegex = new Regex($@"^(?>\s*)(?<args>((?>\s*)[(](?>\s*)([{ diactiticsKeywordsRegexPattern }](?>[{ diactiticsKeywordsRegexPattern }0-9]*)(?>\s*)([,](?>\s*)[{diactiticsKeywordsRegexPattern}][{ diactiticsKeywordsRegexPattern}0-9]*(?>\s*))*)?[)])|[{ diactiticsKeywordsRegexPattern}](?>[{ diactiticsKeywordsRegexPattern }0-9]*))(?>\s*)=>(?<expression>.*)$", RegexOptions.Singleline | RegexOptions.Compiled);
         protected static readonly Regex lambdaArgRegex = new Regex($"[{ diactiticsKeywordsRegexPattern }](?>[{ diactiticsKeywordsRegexPattern }0-9]*)", RegexOptions.Compiled);
         protected static readonly Regex initInNewBeginningRegex = new Regex(@"^(?>\s*){", RegexOptions.Compiled);
+        //End of single quoted strings
+        protected static readonly Regex endOfSingleQuotedStringWithDollar = new Regex("^([^'{\\\\]|\\\\[\\\\\'0abfnrtv])*['{]", RegexOptions.Compiled);
+        protected static readonly Regex endOfSingleQuotedStringWithoutDollar = new Regex("^([^'\\\\]|\\\\[\\\\\'0abfnrtv])*[']", RegexOptions.Compiled);
+        protected static readonly Regex endOfSingleQuotedStringWithDollarWithAt = new Regex("^[^'{]*['{]", RegexOptions.Compiled);
+        protected static readonly Regex endOfSingleQuotedStringWithoutDollarWithAt = new Regex("^[^']*[']", RegexOptions.Compiled);
 
         // Depending on OptionInlineNamespacesEvaluationActive. Initialized in constructor
         protected string InstanceCreationWithNewKeywordRegexPattern { get { return $@"^new(?>\s*)((?<isAnonymous>[{{])|((?<name>[{ diactiticsKeywordsRegexPattern }][{ diactiticsKeywordsRegexPattern}0-9{ (OptionInlineNamespacesEvaluationActive ? @"\." : string.Empty) }]*)(?>\s*)(?<isgeneric>[<](?>[^<>]+|(?<gentag>[<])|(?<-gentag>[>]))*(?(gentag)(?!))[>])?(?>\s*)((?<isfunction>[(])|(?<isArray>\[)|(?<isInit>[{{]))?))"; } }
@@ -764,6 +770,13 @@ namespace CodingSeb.ExpressionEvaluator
         /// By default : true
         /// </summary>
         public bool OptionStringEvaluationActive { get; set; } = true;
+
+        /// <summary>
+        /// if <c>true</c> allow string interpretation with '' (unlike c# syntax)
+        /// if <c>false</c> unactive this functionality.
+        /// By default : false
+        /// </summary>
+        public bool OptionSingleQuotedStringEvaluationActive { get; set; } = false;
 
         /// <summary>
         /// if <c>true</c> allow char interpretation with ''
@@ -1505,6 +1518,7 @@ namespace CodingSeb.ExpressionEvaluator
             EvaluateParenthis,
             EvaluateIndexing,
             EvaluateString,
+            EvaluateSingleQuotedString,
             EvaluateTernaryConditionalOperator,
         });
 
@@ -2705,6 +2719,132 @@ namespace CodingSeb.ExpressionEvaluator
             return false;
         }
 
+        protected virtual bool? EvaluateSingleQuotedString(string expression, Stack<object> stack, ref int i)
+        {
+            if (!OptionSingleQuotedStringEvaluationActive)
+                return false;
+
+            Match stringBeginningMatch = singleQuotedStringBeginningRegex.Match(expression.Substring(i));
+
+            if (stringBeginningMatch.Success)
+            {
+                bool isEscaped = stringBeginningMatch.Groups["escaped"].Success;
+                bool isInterpolated = stringBeginningMatch.Groups["interpolated"].Success;
+
+                i += stringBeginningMatch.Length;
+
+                Regex stringRegexPattern = new Regex($"^[^{(isEscaped ? "" : @"\\")}{(isInterpolated ? "{}" : "")}']*");
+
+                bool endOfString = false;
+
+                StringBuilder resultString = new StringBuilder();
+
+                while (!endOfString && i < expression.Length)
+                {
+                    Match stringMatch = stringRegexPattern.Match(expression.Substring(i, expression.Length - i));
+
+                    resultString.Append(stringMatch.Value);
+                    i += stringMatch.Length;
+
+                    if (expression.Substring(i)[0] == '\'')
+                    {
+                        endOfString = true;
+                        stack.Push(resultString.ToString());
+                    }
+                    else if (expression.Substring(i)[0] == '{')
+                    {
+                        i++;
+
+                        if (expression.Substring(i)[0] == '{')
+                        {
+                            resultString.Append("{");
+                            i++;
+                        }
+                        else
+                        {
+                            StringBuilder innerExp = new StringBuilder();
+                            int bracketCount = 1;
+                            for (; i < expression.Length; i++)
+                            {
+                                if (i + 3 <= expression.Length && expression.Substring(i, 3).Equals("'\"'"))
+                                {
+                                    innerExp.Append("'\"'");
+                                    i += 2;
+                                }
+                                else
+                                {
+                                    Match internalStringMatch = singleQuotedStringBeginningRegex.Match(expression.Substring(i));
+
+                                    if (internalStringMatch.Success)
+                                    {
+                                        string innerString = internalStringMatch.Value + GetCodeUntilEndOfSingleQuotedString(expression.Substring(i + internalStringMatch.Length), internalStringMatch);
+                                        innerExp.Append(innerString);
+                                        i += innerString.Length - 1;
+                                    }
+                                    else
+                                    {
+                                        string s = expression.Substring(i, 1);
+
+                                        if (s.Equals("{")) bracketCount++;
+
+                                        if (s.Equals("}"))
+                                        {
+                                            bracketCount--;
+                                            i++;
+                                            if (bracketCount == 0) break;
+                                        }
+                                        innerExp.Append(s);
+                                    }
+                                }
+                            }
+
+                            if (bracketCount > 0)
+                            {
+                                string beVerb = bracketCount == 1 ? "is" : "are";
+                                throw new Exception($"{bracketCount} '}}' character {beVerb} missing in expression : [{expression}]");
+                            }
+                            resultString.Append(Evaluate(innerExp.ToString()));
+                        }
+                    }
+                    else if (expression.Substring(i, expression.Length - i)[0] == '}')
+                    {
+                        i++;
+
+                        if (expression.Substring(i, expression.Length - i)[0] == '}')
+                        {
+                            resultString.Append("}");
+                            i++;
+                        }
+                        else
+                        {
+                            throw new ExpressionEvaluatorSyntaxErrorException("A character '}' must be escaped in a interpolated string.");
+                        }
+                    }
+                    else if (expression.Substring(i, expression.Length - i)[0] == '\\')
+                    {
+                        i++;
+
+                        if (charEscapedCharDict.TryGetValue(expression.Substring(i, expression.Length - i)[0], out char escapedString))
+                        {
+                            resultString.Append(escapedString);
+                            i++;
+                        }
+                        else
+                        {
+                            throw new ExpressionEvaluatorSyntaxErrorException("There is no corresponding escaped character for \\" + expression.Substring(i, 1));
+                        }
+                    }
+                }
+
+                if (!endOfString)
+                    throw new ExpressionEvaluatorSyntaxErrorException("A ' character is missing.");
+
+                return true;
+            }
+
+            return false;
+        }
+
         protected virtual bool? EvaluateString(string expression, Stack<object> stack, ref int i)
         {
             if (!OptionStringEvaluationActive)
@@ -3254,11 +3394,18 @@ namespace CodingSeb.ExpressionEvaluator
             {
                 string subExpr = expression.Substring(i);
                 Match internalStringMatch = stringBeginningRegex.Match(subExpr);
+                Match internalSingleQuotedStringMatch = singleQuotedStringBeginningRegex.Match( subExpr );
                 Match internalCharMatch = internalCharRegex.Match(subExpr);
 
                 if (OptionStringEvaluationActive && internalStringMatch.Success)
                 {
                     string innerString = internalStringMatch.Value + GetCodeUntilEndOfString(expression.Substring(i + internalStringMatch.Length), internalStringMatch);
+                    currentExpression += innerString;
+                    i += innerString.Length - 1;
+                }
+                else if( OptionSingleQuotedStringEvaluationActive && internalSingleQuotedStringMatch.Success) 
+                {
+                    string innerString = internalSingleQuotedStringMatch.Value + GetCodeUntilEndOfSingleQuotedString( expression.Substring( i + internalSingleQuotedStringMatch.Length ), internalSingleQuotedStringMatch );
                     currentExpression += innerString;
                     i += innerString.Length - 1;
                 }
@@ -3526,6 +3673,84 @@ namespace CodingSeb.ExpressionEvaluator
         }
 
         #endregion
+
+        #region Single Quoted Strings
+
+        protected virtual string GetCodeUntilEndOfSingleQuotedString(string subExpr, Match stringBeginningMatch)
+        {
+            StringBuilder stringBuilder = new StringBuilder();
+
+            GetCodeUntilEndOfSingleQuotedString(subExpr, stringBeginningMatch, ref stringBuilder);
+
+            return stringBuilder.ToString();
+        }
+
+        protected virtual void GetCodeUntilEndOfSingleQuotedString(string subExpr, Match stringBeginningMatch, ref StringBuilder stringBuilder)
+        {
+            Match codeUntilEndOfStringMatch = stringBeginningMatch.Value.Contains("$") ?
+                (stringBeginningMatch.Value.Contains("@") ? endOfSingleQuotedStringWithDollarWithAt.Match(subExpr) : endOfSingleQuotedStringWithDollar.Match(subExpr)) :
+                (stringBeginningMatch.Value.Contains("@") ? endOfSingleQuotedStringWithoutDollarWithAt.Match(subExpr) : endOfSingleQuotedStringWithoutDollar.Match(subExpr));
+
+            if (codeUntilEndOfStringMatch.Success)
+            {
+                if (codeUntilEndOfStringMatch.Value.EndsWith("'"))
+                {
+                    stringBuilder.Append(codeUntilEndOfStringMatch.Value);
+                }
+                else if (codeUntilEndOfStringMatch.Value.EndsWith("{") && codeUntilEndOfStringMatch.Length < subExpr.Length)
+                {
+                    if (subExpr[codeUntilEndOfStringMatch.Length] == '{')
+                    {
+                        stringBuilder.Append(codeUntilEndOfStringMatch.Value);
+                        stringBuilder.Append("{");
+                        GetCodeUntilEndOfSingleQuotedString(subExpr.Substring(codeUntilEndOfStringMatch.Length + 1), stringBeginningMatch, ref stringBuilder);
+                    }
+                    else
+                    {
+                        string interpolation = GetCodeUntilEndOfSingleQuotedStringInterpolation(subExpr.Substring(codeUntilEndOfStringMatch.Length));
+                        stringBuilder.Append(codeUntilEndOfStringMatch.Value);
+                        stringBuilder.Append(interpolation);
+                        GetCodeUntilEndOfSingleQuotedString(subExpr.Substring(codeUntilEndOfStringMatch.Length + interpolation.Length), stringBeginningMatch, ref stringBuilder);
+                    }
+                }
+                else
+                {
+                    stringBuilder.Append(subExpr);
+                }
+            }
+            else
+            {
+                stringBuilder.Append(subExpr);
+            }
+        }
+
+        protected virtual string GetCodeUntilEndOfSingleQuotedStringInterpolation(string subExpr)
+        {
+            Match endOfStringInterpolationMatch = endOfStringInterpolationRegex.Match(subExpr);
+            string result = subExpr;
+
+            if (endOfStringInterpolationMatch.Success)
+            {
+                if (endOfStringInterpolationMatch.Value.EndsWith("}"))
+                {
+                    result = endOfStringInterpolationMatch.Value;
+                }
+                else
+                {
+                    Match stringBeginningForEndBlockMatch = stringBeginningForEndBlockRegex.Match(endOfStringInterpolationMatch.Value);
+
+                    string subString = GetCodeUntilEndOfString(subExpr.Substring(endOfStringInterpolationMatch.Length), stringBeginningForEndBlockMatch);
+
+                    result = endOfStringInterpolationMatch.Value + subString
+                        + GetCodeUntilEndOfSingleQuotedStringInterpolation(subExpr.Substring(endOfStringInterpolationMatch.Length + subString.Length));
+                }
+            }
+
+            return result;
+        }
+
+
+        #endregion        
 
         #region Utils protected sub classes for parsing and interpretation
 
