@@ -2929,7 +2929,7 @@ namespace CodingSeb.ExpressionEvaluator
             return false;
         }
 
-        protected virtual bool? EvaluateSingleQuotedString(string expression, Stack<object> stack, ref int i)
+        protected virtual bool EvaluateSingleQuotedString(string expression, Stack<object> stack, ref int i)
         {
             if (!OptionSingleQuotedStringEvaluationActive)
                 return false;
@@ -3055,7 +3055,7 @@ namespace CodingSeb.ExpressionEvaluator
             return false;
         }
 
-        protected virtual bool? EvaluateString(string expression, Stack<object> stack, ref int i)
+        protected virtual bool EvaluateString(string expression, Stack<object> stack, ref int i)
         {
             if (!OptionStringEvaluationActive)
                 return false;
